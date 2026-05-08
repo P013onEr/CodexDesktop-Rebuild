@@ -82,19 +82,23 @@ if (!fs.existsSync(cliPath)) {
   process.exit(1);
 }
 
+// Resolve app entry: prefer platform-specific _asar/ (has its own package.json)
+const appRoot = path.join(__dirname, '..', 'src', srcPlatform, '_asar');
+const appEntry = fs.existsSync(appRoot) ? appRoot : path.join(__dirname, '..');
+
 console.log(`[start-dev] Platform: ${platform}, Arch: ${arch}`);
 console.log(`[start-dev] CLI Path: ${cliPath}`);
+console.log(`[start-dev] App Root: ${appEntry}`);
 
 // Launch Electron with CLI path
 const electronBin = require('electron');
-const child = spawn(electronBin, ['.'], {
+const child = spawn(electronBin, [appEntry], {
   cwd: path.join(__dirname, '..'),
   stdio: 'inherit',
   env: {
     ...process.env,
     CODEX_CLI_PATH: cliPath,
     BUILD_FLAVOR: process.env.BUILD_FLAVOR || 'dev',
-    // 使用 app:// 自定义协议加载静态资源（而非 Vite dev server）
     ELECTRON_RENDERER_URL: process.env.ELECTRON_RENDERER_URL || 'app://-/index.html',
   },
 });

@@ -2,18 +2,15 @@
 /**
  * Post-build patch: Force-enable Fast mode (speed selector)
  *
- * The speed selector is gated by a function that checks:
- *   !(authMethod !== "chatgpt" || featureRequirements.fast_mode === false)
- * This means API-key users never see the speed selector.
+ * The speed selector is gated by authMethod === "chatgpt" checks.
+ * API-key users never see it because their authMethod differs.
  *
- * This patch locates that gate function via AST and replaces
- * the return expression with !0, making fast mode always available.
+ * This patch locates BinaryExpression nodes matching:
+ *   X.authMethod !== "chatgpt"
+ * inside functions that also reference "fast_mode", and replaces
+ * the comparison with !1 (always false), removing the auth gate.
  *
  * Target: permissions-mode-helpers-*.js (or any chunk with the pattern)
- *
- * Usage:
- *   node scripts/patch-fast-mode.js [platform]
- *   node scripts/patch-fast-mode.js --check
  */
 const fs = require("fs");
 const path = require("path");
@@ -36,54 +33,40 @@ function walk(node, visitor) {
   }
 }
 
-/**
- * Match the fast-mode gate pattern:
- *   !(authMethod !== "chatgpt" || X.fast_mode === !1)
- *
- * AST structure:
- *   UnaryExpression { operator: "!", argument:
- *     LogicalExpression { operator: "||",
- *       left:  BinaryExpression { operator: "!==" } containing "chatgpt"
- *       right: BinaryExpression { operator: "===" } containing "fast_mode"
- *     }
- *   }
- *
- * We replace the entire UnaryExpression with !0.
- */
 function collectPatches(ast, source) {
   const patches = [];
 
   walk(ast, (node) => {
-    if (node.type !== "UnaryExpression" || node.operator !== "!" || !node.prefix)
-      return;
+    // Match function bodies containing both authMethod and fast_mode
+    const isFn =
+      node.type === "FunctionDeclaration" ||
+      node.type === "FunctionExpression" ||
+      node.type === "ArrowFunctionExpression";
+    if (!isFn) return;
 
-    const arg = node.argument;
-    if (!arg || arg.type !== "LogicalExpression" || arg.operator !== "||") return;
+    const fnSrc = source.slice(node.start, node.end);
+    if (!fnSrc.includes("authMethod") || !fnSrc.includes("fast_mode")) return;
 
-    const left = arg.left;
-    const right = arg.right;
+    // Inside this function, find: X.authMethod !== `chatgpt`
+    walk(node, (child) => {
+      if (child.type !== "BinaryExpression" || child.operator !== "!==") return;
 
-    // left: X.authMethod !== "chatgpt"
-    if (!left || left.type !== "BinaryExpression" || left.operator !== "!==")
-      return;
-    const leftSrc = source.slice(left.start, left.end);
-    if (!leftSrc.includes("authMethod") || !leftSrc.includes("chatgpt")) return;
+      const childSrc = source.slice(child.start, child.end);
+      if (!childSrc.includes("authMethod") || !childSrc.includes("chatgpt"))
+        return;
 
-    // right: Y.fast_mode === !1
-    if (!right || right.type !== "BinaryExpression" || right.operator !== "===")
-      return;
-    const rightSrc = source.slice(right.start, right.end);
-    if (!rightSrc.includes("fast_mode")) return;
+      if (childSrc === "!1") return;
 
-    const exprSrc = source.slice(node.start, node.end);
-    if (exprSrc === "!0") return;
+      // Avoid duplicate patches at same offset
+      if (patches.some((p) => p.start === child.start)) return;
 
-    patches.push({
-      id: "fast_mode_gate",
-      start: node.start,
-      end: node.end,
-      replacement: "!0",
-      original: exprSrc,
+      patches.push({
+        id: "fast_mode_auth_gate",
+        start: child.start,
+        end: child.end,
+        replacement: "!1",
+        original: childSrc,
+      });
     });
   });
 
@@ -93,7 +76,9 @@ function collectPatches(ast, source) {
 function main() {
   const args = process.argv.slice(2);
   const isCheck = args.includes("--check");
-  const platform = args.find((a) => ["mac-arm64", "mac-x64", "win"].includes(a));
+  const platform = args.find((a) =>
+    ["mac-arm64", "mac-x64", "win"].includes(a),
+  );
 
   const platforms = platform
     ? [platform]
@@ -123,26 +108,27 @@ function main() {
   let totalPatched = 0;
 
   for (const bundle of targets) {
-    console.log(`\n-- [${bundle.platform}] ${relPath(bundle.path)}`);
     const source = fs.readFileSync(bundle.path, "utf-8");
 
     const t0 = Date.now();
-    const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
-    console.log(`   parse: ${Date.now() - t0}ms`);
-
-    const patches = collectPatches(ast, source);
-
-    if (patches.length === 0) {
-      if (source.includes("fast_mode")) {
-        console.log("   [ok] fast_mode present but gate already patched or pattern changed");
-      }
+    let ast;
+    try {
+      ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+    } catch {
       continue;
     }
 
+    const patches = collectPatches(ast, source);
+
+    if (patches.length === 0) continue;
+
+    console.log(
+      `  [${bundle.platform}] ${relPath(bundle.path)} (parse ${Date.now() - t0}ms)`,
+    );
+
     if (isCheck) {
-      console.log(`   [?] ${patches.length} match(es)`);
       for (const p of patches) {
-        console.log(`     > [${p.id}] offset ${p.start}: ${p.original.slice(0, 80)}...`);
+        console.log(`    [?] offset ${p.start}: ${p.original} -> ${p.replacement}`);
       }
       continue;
     }
@@ -151,16 +137,19 @@ function main() {
 
     let code = source;
     for (const p of patches) {
-      console.log(`   * [${p.id}] offset ${p.start}: ${p.original.slice(0, 60)}... -> ${p.replacement}`);
+      console.log(`    * ${p.original} -> ${p.replacement}`);
       code = code.slice(0, p.start) + p.replacement + code.slice(p.end);
     }
 
     fs.writeFileSync(bundle.path, code, "utf-8");
-    console.log(`   [ok] ${patches.length} replacement(s)`);
     totalPatched += patches.length;
   }
 
-  console.log(`\n  [done] ${totalPatched} total patch(es)`);
+  if (totalPatched > 0) {
+    console.log(`  [ok] ${totalPatched} auth gate(s) removed`);
+  } else {
+    console.log("  [ok] fast_mode auth gates already patched or absent");
+  }
 }
 
 main();
