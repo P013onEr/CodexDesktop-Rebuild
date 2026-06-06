@@ -69,6 +69,42 @@ function findDirsByName(root, name) {
   return results;
 }
 
+function findFilesBySuffix(root, suffix) {
+  const results = [];
+  if (!fs.existsSync(root)) return results;
+
+  const visit = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(p);
+      } else if (entry.isFile() && entry.name.endsWith(suffix)) {
+        results.push(p);
+      }
+    }
+  };
+
+  visit(root);
+  return results;
+}
+
+function findAppBundles(root) {
+  const results = [];
+  if (!fs.existsSync(root)) return results;
+
+  const visit = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name);
+      if (!entry.isDirectory()) continue;
+      if (entry.name.endsWith(".app")) results.push(p);
+      visit(p);
+    }
+  };
+
+  visit(root);
+  return results;
+}
+
 function runQuiet(command, args) {
   return execFileSync(command, args, { stdio: ["ignore", "pipe", "pipe"] });
 }
@@ -83,21 +119,58 @@ function adHocSignAndVerify(appPath, label) {
   console.log(`   [ok] signed ${label}`);
 }
 
-function signComputerUseHelpers(outApp) {
-  if (process.platform !== "darwin") return [];
-
+function findComputerUseHelpers(outApp) {
   const resourcesDir = path.join(outApp, "Contents", "Resources");
-  const helpers = findDirsByName(resourcesDir, "Codex Computer Use.app");
+  return findDirsByName(resourcesDir, "Codex Computer Use.app");
+}
+
+function patchComputerUseParentRequirements(outApp, helpers) {
+  if (process.platform !== "darwin") return;
+
   if (helpers.length === 0) {
     console.log("   [computer-use] no Codex Computer Use.app found");
-    return [];
+    return;
   }
+
+  const patched = [];
+  for (const helper of helpers) {
+    for (const requirement of findFilesBySuffix(helper, "_Parent.coderequirement")) {
+      const before = fs.readFileSync(requirement, "utf8");
+      try {
+        runQuiet("plutil", ["-remove", "team-identifier", requirement]);
+      } catch {}
+
+      const after = fs.readFileSync(requirement, "utf8");
+      if (after !== before) patched.push(requirement);
+      if (after.includes("<key>team-identifier</key>")) {
+        throw new Error(`failed to remove team-identifier from ${requirement}`);
+      }
+    }
+  }
+
+  if (patched.length > 0) {
+    console.log(`   [computer-use] patched ${patched.length} parent requirement(s) for ad-hoc rebuilds`);
+    for (const requirement of patched) {
+      console.log(`     - ${path.relative(outApp, requirement)}`);
+    }
+  }
+}
+
+function signComputerUseHelpers(outApp, helpers) {
+  if (process.platform !== "darwin") return;
+
+  if (helpers.length === 0) return;
 
   console.log(`   [computer-use] signing ${helpers.length} helper app(s)`);
   for (const helper of helpers) {
+    const nestedApps = findAppBundles(helper)
+      .filter((app) => app !== helper)
+      .sort((a, b) => b.length - a.length);
+    for (const nestedApp of nestedApps) {
+      adHocSignAndVerify(nestedApp, path.relative(outApp, nestedApp));
+    }
     adHocSignAndVerify(helper, path.relative(outApp, helper));
   }
-  return helpers;
 }
 
 function verifyComputerUseHelpers(outApp, helpers) {
@@ -225,13 +298,18 @@ function buildMac(platform) {
   // 6. Replace codex CLI
   replaceCodex(platform, resourcesDir, "codex");
 
-  // 7. Ad-hoc sign native helper apps before sealing the parent app.
+  // 7. Patch and ad-hoc sign native helper apps before sealing the parent app.
   //
   // Appshots are powered by the bundled Codex Computer Use.app. The parent
   // Codex.app signature can be valid while that nested helper still has an
   // invalid signature; macOS then rejects Apple Events with:
-  // "Sender process is not authenticated". Sign and verify it explicitly.
-  const computerUseHelpers = signComputerUseHelpers(outApp);
+  // "Sender process is not authenticated". Official helpers also require the
+  // parent to have OpenAI's Team ID; ad-hoc rebuilt apps have no TeamIdentifier,
+  // which otherwise causes "teamNotFound". Remove that parent Team ID gate and
+  // sign the nested helpers explicitly.
+  const computerUseHelpers = findComputerUseHelpers(outApp);
+  patchComputerUseParentRequirements(outApp, computerUseHelpers);
+  signComputerUseHelpers(outApp, computerUseHelpers);
 
   // 8. Ad-hoc re-sign (prevents "damaged app" Gatekeeper error)
   console.log("   [codesign] ad-hoc signing");
