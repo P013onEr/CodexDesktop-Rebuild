@@ -12,7 +12,7 @@
  */
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { execFileSync, execSync } = require("child_process");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
@@ -47,6 +47,67 @@ function copyRecursive(src, dest) {
     }
   }
   return count;
+}
+
+function findDirsByName(root, name) {
+  const results = [];
+  if (!fs.existsSync(root)) return results;
+
+  const visit = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name);
+      if (!entry.isDirectory()) continue;
+      if (entry.name === name) {
+        results.push(p);
+        continue;
+      }
+      visit(p);
+    }
+  };
+
+  visit(root);
+  return results;
+}
+
+function runQuiet(command, args) {
+  return execFileSync(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+}
+
+function adHocSignAndVerify(appPath, label) {
+  try {
+    runQuiet("xattr", ["-cr", appPath]);
+  } catch {}
+
+  runQuiet("codesign", ["--sign", "-", "--force", "--deep", appPath]);
+  runQuiet("codesign", ["--verify", "--verbose=2", appPath]);
+  console.log(`   [ok] signed ${label}`);
+}
+
+function signComputerUseHelpers(outApp) {
+  if (process.platform !== "darwin") return [];
+
+  const resourcesDir = path.join(outApp, "Contents", "Resources");
+  const helpers = findDirsByName(resourcesDir, "Codex Computer Use.app");
+  if (helpers.length === 0) {
+    console.log("   [computer-use] no Codex Computer Use.app found");
+    return [];
+  }
+
+  console.log(`   [computer-use] signing ${helpers.length} helper app(s)`);
+  for (const helper of helpers) {
+    adHocSignAndVerify(helper, path.relative(outApp, helper));
+  }
+  return helpers;
+}
+
+function verifyComputerUseHelpers(outApp, helpers) {
+  if (process.platform !== "darwin") return;
+  for (const helper of helpers) {
+    runQuiet("codesign", ["--verify", "--verbose=2", helper]);
+  }
+  if (helpers.length > 0) {
+    console.log("   [ok] computer-use helper signatures verified");
+  }
 }
 
 function resolveCodexVendor(platform) {
@@ -164,16 +225,26 @@ function buildMac(platform) {
   // 6. Replace codex CLI
   replaceCodex(platform, resourcesDir, "codex");
 
-  // 7. Ad-hoc re-sign (prevents "damaged app" Gatekeeper error)
+  // 7. Ad-hoc sign native helper apps before sealing the parent app.
+  //
+  // Appshots are powered by the bundled Codex Computer Use.app. The parent
+  // Codex.app signature can be valid while that nested helper still has an
+  // invalid signature; macOS then rejects Apple Events with:
+  // "Sender process is not authenticated". Sign and verify it explicitly.
+  const computerUseHelpers = signComputerUseHelpers(outApp);
+
+  // 8. Ad-hoc re-sign (prevents "damaged app" Gatekeeper error)
   console.log("   [codesign] ad-hoc signing");
   try {
-    execSync(`codesign --sign - --force --deep "${outApp}"`, { stdio: "pipe" });
+    execFileSync("codesign", ["--sign", "-", "--force", "--deep", outApp], { stdio: "pipe" });
+    execFileSync("codesign", ["--verify", "--verbose=2", outApp], { stdio: "pipe" });
+    verifyComputerUseHelpers(outApp, computerUseHelpers);
     console.log("   [ok] ad-hoc signed");
   } catch (e) {
     console.log(`   [!] ad-hoc sign failed: ${e.message}`);
   }
 
-  // 8. Create DMG
+  // 9. Create DMG
   const version = getVersion(asarDir);
   const dmgName = `Codex-${platform}-${version}.dmg`;
   const dmgPath = path.join(OUT_DIR, dmgName);
