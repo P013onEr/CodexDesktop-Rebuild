@@ -26,13 +26,25 @@ function runtimeShim() {
   if (typeof window === "undefined" || window.__codexRebuildPluginMarketplaceUnlock === VERSION) return;
   window.__codexRebuildPluginMarketplaceUnlock = VERSION;
 
+  const MARKETPLACE_ALIASES = {
+    "openai-bundled": "oai-bundled",
+    "openai-curated": "oai-curated",
+    "openai-primary-runtime": "oai-runtime",
+  };
+  const LEGACY_MARKETPLACE_ALIASES = {
+    "codex-rebuild-openai-bundled": "openai-bundled",
+    "codex-rebuild-openai-curated": "openai-curated",
+    "codex-rebuild-openai-primary-runtime": "openai-primary-runtime",
+  };
+  const MARKETPLACE_LABELS = {
+    "openai-bundled": "OAI Built-in",
+    "openai-curated": "OAI Curated",
+    "openai-primary-runtime": "OAI Runtime",
+  };
   const OFFICIAL_MARKETPLACES = new Set([
-    "openai-bundled",
-    "openai-curated",
-    "openai-primary-runtime",
-    "codex-rebuild-openai-bundled",
-    "codex-rebuild-openai-curated",
-    "codex-rebuild-openai-primary-runtime",
+    ...Object.keys(MARKETPLACE_ALIASES),
+    ...Object.values(MARKETPLACE_ALIASES),
+    ...Object.keys(LEGACY_MARKETPLACE_ALIASES),
   ]);
   const DISABLED_INSTALL_SELECTOR = [
     "button:disabled",
@@ -53,10 +65,12 @@ function runtimeShim() {
   }
 
   function restoreMarketplaceName(name) {
-    if (name === "codex-rebuild-openai-bundled") return "openai-bundled";
-    if (name === "codex-rebuild-openai-curated") return "openai-curated";
-    if (name === "codex-rebuild-openai-primary-runtime") return "openai-primary-runtime";
-    return name;
+    const raw = String(name || "");
+    if (LEGACY_MARKETPLACE_ALIASES[raw]) return LEGACY_MARKETPLACE_ALIASES[raw];
+    for (const [official, alias] of Object.entries(MARKETPLACE_ALIASES)) {
+      if (raw === alias) return official;
+    }
+    return raw;
   }
 
   function officialMarketplaceName(name) {
@@ -64,17 +78,13 @@ function runtimeShim() {
   }
 
   function aliasMarketplaceName(name) {
-    if (name === "openai-bundled") return "codex-rebuild-openai-bundled";
-    if (name === "openai-curated") return "codex-rebuild-openai-curated";
-    if (name === "openai-primary-runtime") return "codex-rebuild-openai-primary-runtime";
-    return name;
+    const restored = restoreMarketplaceName(name);
+    return MARKETPLACE_ALIASES[restored] || restored;
   }
 
   function displayNameForMarketplace(name, fallback) {
     const restored = restoreMarketplaceName(name);
-    if (restored === "openai-bundled") return "OpenAI plugins 1 (unlocked)";
-    if (restored === "openai-curated") return "OpenAI plugins 2 (unlocked)";
-    if (restored === "openai-primary-runtime") return "OpenAI plugins 3 (unlocked)";
+    if (MARKETPLACE_LABELS[restored]) return MARKETPLACE_LABELS[restored];
     return fallback || name;
   }
 
