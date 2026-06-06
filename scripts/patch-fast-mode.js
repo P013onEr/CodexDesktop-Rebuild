@@ -5,10 +5,17 @@
  * The speed selector is gated by authMethod === "chatgpt" checks.
  * API-key users never see it because their authMethod differs.
  *
- * This patch locates BinaryExpression nodes matching:
+ * This patch locates two known Fast mode gates:
+ *
+ * 1. BinaryExpression nodes matching:
  *   X.authMethod !== "chatgpt"
  * inside functions that also reference "fast_mode", and replaces
  * the comparison with !1 (always false), removing the auth gate.
+ *
+ * 2. Minified statsig helper functions that return the computed fast gate
+ * result, and replaces the final return value with true. This mirrors the
+ * ct-only app.asar patch used by codex-openfast, but operates on the rebuild
+ * tree before packaging/signing.
  *
  * Target: permissions-mode-helpers-*.js (or any chunk with the pattern)
  */
@@ -73,6 +80,43 @@ function collectPatches(ast, source) {
   return patches;
 }
 
+function collectStatsigFastGatePatches(source) {
+  const ident = String.raw`[A-Za-z_$][A-Za-z0-9_$]*`;
+  const quote = String.raw`[\`"']`;
+  const pattern = new RegExp(
+    String.raw`(function ${ident}\(\)\{let e=\(0,${ident}\.c\)\(3\),\{authMethod:t\}=${ident}\(\),\[n\]=${ident}\(${quote}statsig_default_enable_features${quote}\),r;return e\[0\]!==t\|\|e\[1\]!==n\?\.fast_mode\?\(r=n\?\.fast_mode===!0&&${ident}\(t\),e\[0\]=t,e\[1\]=n\?\.fast_mode,e\[2\]=r\):r=e\[2\],)(r|true)(\})`,
+    "g",
+  );
+
+  const patches = [];
+  for (const match of source.matchAll(pattern)) {
+    const original = match[2];
+    if (original === "true") continue;
+
+    const start = match.index + match[1].length;
+    patches.push({
+      id: "statsig_fast_gate",
+      start,
+      end: start + original.length,
+      replacement: "true",
+      original,
+    });
+  }
+
+  return patches;
+}
+
+function mergePatches(...groups) {
+  const patches = [];
+  for (const group of groups) {
+    for (const patch of group) {
+      if (patches.some((p) => p.start === patch.start)) continue;
+      patches.push(patch);
+    }
+  }
+  return patches;
+}
+
 function main() {
   const args = process.argv.slice(2);
   const isCheck = args.includes("--check");
@@ -94,7 +138,11 @@ function main() {
       if (!f.endsWith(".js")) continue;
       const fp = path.join(assetsDir, f);
       const src = fs.readFileSync(fp, "utf-8");
-      if (src.includes("authMethod") && src.includes("fast_mode")) {
+      if (
+        src.includes("fast_mode") &&
+        (src.includes("authMethod") ||
+          src.includes("statsig_default_enable_features"))
+      ) {
         targets.push({ platform: plat, path: fp });
       }
     }
@@ -111,14 +159,19 @@ function main() {
     const source = fs.readFileSync(bundle.path, "utf-8");
 
     const t0 = Date.now();
-    let ast;
+    let astPatches = [];
     try {
-      ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+      const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+      astPatches = collectPatches(ast, source);
     } catch {
-      continue;
+      // The statsig gate patch is regex-based and can still run on minified
+      // chunks even when acorn cannot parse a particular bundle.
     }
 
-    const patches = collectPatches(ast, source);
+    const patches = mergePatches(
+      astPatches,
+      collectStatsigFastGatePatches(source),
+    );
 
     if (patches.length === 0) continue;
 
@@ -146,9 +199,9 @@ function main() {
   }
 
   if (totalPatched > 0) {
-    console.log(`  [ok] ${totalPatched} auth gate(s) removed`);
+    console.log(`  [ok] ${totalPatched} fast mode gate(s) patched`);
   } else {
-    console.log("  [ok] fast_mode auth gates already patched or absent");
+    console.log("  [ok] fast_mode gates already patched or absent");
   }
 }
 
