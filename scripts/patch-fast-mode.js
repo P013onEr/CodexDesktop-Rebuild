@@ -98,6 +98,30 @@ function collectPatches(ast, source) {
   return patches;
 }
 
+function collectNativeFastAuthPatches(ast, source) {
+  const patches = [];
+  if (!source.includes("fast_mode")) return patches;
+
+  walk(ast, (node) => {
+    if (node.type !== "BinaryExpression") return;
+    if (!["!==", "!=", "===", "=="].includes(node.operator)) return;
+
+    const expr = source.slice(node.start, node.end);
+    if (!expr.includes("authMethod") || !expr.includes("chatgpt")) return;
+    if (expr === "!0" || expr === "!1") return;
+
+    patches.push({
+      id: "native_fast_auth_gate",
+      start: node.start,
+      end: node.end,
+      replacement: node.operator.startsWith("!") ? "!1" : "!0",
+      original: expr,
+    });
+  });
+
+  return patches;
+}
+
 function collectStatsigFastGatePatches(source) {
   const ident = String.raw`[A-Za-z_$][A-Za-z0-9_$]*`;
   const quote = String.raw`[\`"']`;
@@ -118,6 +142,31 @@ function collectStatsigFastGatePatches(source) {
       end: start + original.length,
       replacement: "true",
       original,
+    });
+  }
+
+  return patches;
+}
+
+function collectGenericStatsigFastModePatches(source) {
+  const ident = String.raw`[A-Za-z_$][A-Za-z0-9_$]*`;
+  const fastExpr = new RegExp(
+    String.raw`(${ident}\??\.fast_mode===!0&&${ident}\(${ident}\))`,
+    "g",
+  );
+  const patches = [];
+
+  if (!source.includes("fast_mode") || !source.includes("statsig_default_enable_features")) {
+    return patches;
+  }
+
+  for (const match of source.matchAll(fastExpr)) {
+    patches.push({
+      id: "native_fast_statsig_gate",
+      start: match.index,
+      end: match.index + match[1].length,
+      replacement: "!0",
+      original: match[1],
     });
   }
 
@@ -685,7 +734,9 @@ function main() {
 
       const patches = mergePatches(
         astPatches,
+        collectNativeFastAuthPatches(ast, source),
         collectStatsigFastGatePatches(source),
+        collectGenericStatsigFastModePatches(source),
       );
 
       if (patches.length === 0) continue;
