@@ -9,6 +9,12 @@ on:
         default: "all"
         type: choice
         options: [all, mac, windows, linux]
+      release_mode:
+        description: "Create a GitHub release from the build artifacts"
+        required: false
+        default: "draft"
+        type: choice
+        options: [draft, publish, none]
 
 env:
   NODE_VERSION: "24"
@@ -92,3 +98,47 @@ jobs:
             out/make/deb/**/*.deb
             out/make/rpm/**/*.rpm
             out/make/zip/**/*.zip
+
+  release:
+    needs: [build-mac, build-windows, build-linux]
+    if: always() && inputs.release_mode != 'none' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+
+      - name: Display artifacts
+        run: ls -lhR artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Codex ${{ steps.version.outputs.version }}
+          body: |
+            Codex Desktop rebuild artifacts.
+
+            Platform input: `${{ inputs.platform }}`
+            Workflow run: `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`
+          files: artifacts/**/*
+          draft: ${{ inputs.release_mode == 'draft' }}
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
