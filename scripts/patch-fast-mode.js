@@ -164,7 +164,7 @@ function serviceTierShim(defaultMode, fastTierValue) {
   return `
 ${SERVICE_TIER_START_MARKER}
 ;(() => {
-  const VERSION = "codex-rebuild-service-tier-priority-shim-v1";
+  const VERSION = "codex-rebuild-service-tier-priority-shim-v2";
   if (typeof window === "undefined" || window.__codexRebuildServiceTierShim === VERSION) return;
   window.__codexRebuildServiceTierShim = VERSION;
 
@@ -425,21 +425,26 @@ ${SERVICE_TIER_START_MARKER}
   }
 
   function status() {
+    const dispatcherPatchInstalled = !!window.__codexRebuildServiceTierPatchInstalled;
+    const requestPatchInstalled = !!window.__codexRebuildServiceTierRequestPatchInstalled;
+    const dispatcherLastError = window.__codexRebuildServiceTierLastError || "";
+    const requestLastError = window.__codexRebuildServiceTierRequestLastError || "";
     return {
+      shimVersion: VERSION,
       configuredMode: configuredMode(),
       effectiveMode: effectiveMode(),
       inheritedServiceTier,
       inheritedServiceTierLoaded,
       fastTierValue: fastTierValue(),
-      patchInstalled: !!window.__codexRebuildServiceTierPatchInstalled,
-      dispatcherPatchInstalled: !!window.__codexRebuildServiceTierPatchInstalled,
-      requestPatchInstalled: !!window.__codexRebuildServiceTierRequestPatchInstalled,
+      patchInstalled: dispatcherPatchInstalled || requestPatchInstalled,
+      dispatcherPatchInstalled,
+      requestPatchInstalled,
       requestClientPatchCount,
       rewriteCount,
       lastRewrite,
-      lastError: window.__codexRebuildServiceTierLastError || window.__codexRebuildServiceTierRequestLastError || "",
-      dispatcherLastError: window.__codexRebuildServiceTierLastError || "",
-      requestLastError: window.__codexRebuildServiceTierRequestLastError || "",
+      lastError: requestLastError || (!requestPatchInstalled ? dispatcherLastError : ""),
+      dispatcherLastError,
+      requestLastError,
     };
   }
 
