@@ -180,6 +180,7 @@ ${SERVICE_TIER_START_MARKER}
   let inheritedServiceTierLoaded = false;
   let rewriteCount = 0;
   let lastRewrite = null;
+  let requestClientPatchCount = 0;
 
   function normalizeMode(value) {
     const normalized = String(value || "").trim().toLowerCase();
@@ -261,6 +262,11 @@ ${SERVICE_TIER_START_MARKER}
   function methodFromMessage(type, payload) {
     if (type === "send-cli-request-for-host" && payload && payload.method) return String(payload.method);
     return String(type || "");
+  }
+
+  function requestMethod(method, params) {
+    if (method === "send-cli-request-for-host" && params && params.method) return String(params.method);
+    return String(method || "");
   }
 
   function applyServiceTier(method, params) {
@@ -367,6 +373,42 @@ ${SERVICE_TIER_START_MARKER}
     }
   }
 
+  function patchRequestClient(client) {
+    if (!client || typeof client.sendRequest !== "function") return false;
+    if (client.__codexRebuildServiceTierRequestPatch === VERSION) return true;
+    const originalSendRequest = client.__codexRebuildServiceTierOriginalSendRequest || client.sendRequest.bind(client);
+    client.__codexRebuildServiceTierOriginalSendRequest = originalSendRequest;
+    client.sendRequest = async function codexRebuildServiceTierSendRequest(method, params, options) {
+      const realMethod = requestMethod(String(method || ""), params);
+      const nextParams = applyServiceTier(realMethod, params);
+      return await originalSendRequest(method, nextParams, options);
+    };
+    client.__codexRebuildServiceTierRequestPatch = VERSION;
+    return true;
+  }
+
+  async function installRequestClientPatch() {
+    try {
+      const module = await loadAppModule("app-server-manager-signals-");
+      const candidates = Object.values(module || {}).filter((value) => value && typeof value === "object");
+      let patched = 0;
+      for (const candidate of candidates) {
+        if (patchRequestClient(candidate)) patched += 1;
+        if (typeof candidate.sendRequest !== "function" && typeof candidate.get === "function") {
+          try {
+            if (patchRequestClient(candidate.get())) patched += 1;
+          } catch {}
+        }
+      }
+      requestClientPatchCount = patched;
+      window.__codexRebuildServiceTierRequestPatchInstalled = patched > 0;
+      refreshBadge();
+    } catch (error) {
+      window.__codexRebuildServiceTierRequestLastError = String(error && error.message || error);
+      refreshBadge();
+    }
+  }
+
   function setMode(mode) {
     localStorage.setItem(MODE_KEY, normalizeMode(mode));
     void loadInheritedServiceTier();
@@ -390,9 +432,14 @@ ${SERVICE_TIER_START_MARKER}
       inheritedServiceTierLoaded,
       fastTierValue: fastTierValue(),
       patchInstalled: !!window.__codexRebuildServiceTierPatchInstalled,
+      dispatcherPatchInstalled: !!window.__codexRebuildServiceTierPatchInstalled,
+      requestPatchInstalled: !!window.__codexRebuildServiceTierRequestPatchInstalled,
+      requestClientPatchCount,
       rewriteCount,
       lastRewrite,
-      lastError: window.__codexRebuildServiceTierLastError || "",
+      lastError: window.__codexRebuildServiceTierLastError || window.__codexRebuildServiceTierRequestLastError || "",
+      dispatcherLastError: window.__codexRebuildServiceTierLastError || "",
+      requestLastError: window.__codexRebuildServiceTierRequestLastError || "",
     };
   }
 
@@ -426,6 +473,8 @@ ${SERVICE_TIER_START_MARKER}
       "Inherited default-service-tier: " + inherited,
       "Fast sends serviceTier=priority on thread/start, thread/resume, turn/start.",
       "Rewrites: " + current.rewriteCount,
+      "Dispatcher patch: " + (current.dispatcherPatchInstalled ? "ok" : "no"),
+      "Request patch: " + (current.requestPatchInstalled ? "ok" : "no") + " (" + current.requestClientPatchCount + ")",
       "Click: toggle fast/standard. Right click: inherit.",
       current.lastError ? "Last error: " + current.lastError : "",
     ].filter(Boolean).join("\\n");
@@ -497,7 +546,9 @@ ${SERVICE_TIER_START_MARKER}
   scheduleBadgeInstall();
   void loadInheritedServiceTier();
   void installDispatcherPatch();
+  void installRequestClientPatch();
   setInterval(() => void installDispatcherPatch(), 5000);
+  setInterval(() => void installRequestClientPatch(), 5000);
   setInterval(() => void loadInheritedServiceTier(), 15000);
   setInterval(refreshBadge, 1000);
 })();
