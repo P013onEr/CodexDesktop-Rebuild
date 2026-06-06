@@ -88,23 +88,6 @@ function findFilesBySuffix(root, suffix) {
   return results;
 }
 
-function findAppBundles(root) {
-  const results = [];
-  if (!fs.existsSync(root)) return results;
-
-  const visit = (dir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const p = path.join(dir, entry.name);
-      if (!entry.isDirectory()) continue;
-      if (entry.name.endsWith(".app")) results.push(p);
-      visit(p);
-    }
-  };
-
-  visit(root);
-  return results;
-}
-
 function runQuiet(command, args) {
   return execFileSync(command, args, { stdio: ["ignore", "pipe", "pipe"] });
 }
@@ -124,15 +107,25 @@ function findComputerUseHelpers(outApp) {
   return findDirsByName(resourcesDir, "Codex Computer Use.app");
 }
 
+function findContainingAppBundle(filePath, stopAt) {
+  let dir = path.dirname(filePath);
+  while (dir !== stopAt && dir !== path.dirname(dir)) {
+    if (path.basename(dir).endsWith(".app")) return dir;
+    dir = path.dirname(dir);
+  }
+  return null;
+}
+
 function patchComputerUseParentRequirements(outApp, helpers) {
-  if (process.platform !== "darwin") return;
+  if (process.platform !== "darwin") return [];
 
   if (helpers.length === 0) {
     console.log("   [computer-use] no Codex Computer Use.app found");
-    return;
+    return [];
   }
 
   const patched = [];
+  const requirementApps = new Set();
   for (const helper of helpers) {
     for (const requirement of findFilesBySuffix(helper, "_Parent.coderequirement")) {
       const before = fs.readFileSync(requirement, "utf8");
@@ -142,6 +135,8 @@ function patchComputerUseParentRequirements(outApp, helpers) {
 
       const after = fs.readFileSync(requirement, "utf8");
       if (after !== before) patched.push(requirement);
+      const requirementApp = findContainingAppBundle(requirement, helper);
+      if (requirementApp) requirementApps.add(requirementApp);
       if (after.includes("<key>team-identifier</key>")) {
         throw new Error(`failed to remove team-identifier from ${requirement}`);
       }
@@ -154,21 +149,21 @@ function patchComputerUseParentRequirements(outApp, helpers) {
       console.log(`     - ${path.relative(outApp, requirement)}`);
     }
   }
+
+  return [...requirementApps];
 }
 
-function signComputerUseHelpers(outApp, helpers) {
+function signComputerUseHelpers(outApp, helpers, nestedAppsToSign = []) {
   if (process.platform !== "darwin") return;
 
   if (helpers.length === 0) return;
 
   console.log(`   [computer-use] signing ${helpers.length} helper app(s)`);
+  const nestedApps = [...new Set(nestedAppsToSign)].sort((a, b) => b.length - a.length);
+  for (const nestedApp of nestedApps) {
+    adHocSignAndVerify(nestedApp, path.relative(outApp, nestedApp));
+  }
   for (const helper of helpers) {
-    const nestedApps = findAppBundles(helper)
-      .filter((app) => app !== helper)
-      .sort((a, b) => b.length - a.length);
-    for (const nestedApp of nestedApps) {
-      adHocSignAndVerify(nestedApp, path.relative(outApp, nestedApp));
-    }
     adHocSignAndVerify(helper, path.relative(outApp, helper));
   }
 }
@@ -308,8 +303,8 @@ function buildMac(platform) {
   // which otherwise causes "teamNotFound". Remove that parent Team ID gate and
   // sign the nested helpers explicitly.
   const computerUseHelpers = findComputerUseHelpers(outApp);
-  patchComputerUseParentRequirements(outApp, computerUseHelpers);
-  signComputerUseHelpers(outApp, computerUseHelpers);
+  const computerUseRequirementApps = patchComputerUseParentRequirements(outApp, computerUseHelpers);
+  signComputerUseHelpers(outApp, computerUseHelpers, computerUseRequirementApps);
 
   // 8. Ad-hoc re-sign (prevents "damaged app" Gatekeeper error)
   console.log("   [codesign] ad-hoc signing");
