@@ -8,7 +8,7 @@ on:
         required: false
         default: "all"
         type: choice
-        options: [all, mac, windows, linux]
+        options: [all, mac, windows]
       release_mode:
         description: "Create a GitHub release from the build artifacts"
         required: false
@@ -70,37 +70,8 @@ jobs:
           name: Codex-Windows-x64
           path: out/*.zip
 
-  build-linux:
-    if: inputs.platform == 'all' || inputs.platform == 'linux'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x64, arm64]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-      - run: |
-          npm ci
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y rpm fakeroot dpkg 7zip
-      - run: node scripts/sync-upstream.js --force --skip-win
-      - run: node scripts/patch-all.js mac-${{ matrix.arch }}
-      - run: npm run build:linux-${{ matrix.arch }}
-      - uses: actions/upload-artifact@v7
-        with:
-          name: Codex-Linux-${{ matrix.arch }}
-          path: |
-            out/make/deb/**/*.deb
-            out/make/rpm/**/*.rpm
-            out/make/zip/**/*.zip
-
   release:
-    needs: [build-mac, build-windows, build-linux]
+    needs: [build-mac, build-windows]
     if: always() && inputs.release_mode != 'none' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
