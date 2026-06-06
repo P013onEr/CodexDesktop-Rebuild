@@ -178,6 +178,8 @@ ${SERVICE_TIER_START_MARKER}
   const modulePromises = new Map();
   let inheritedServiceTier = null;
   let inheritedServiceTierLoaded = false;
+  let rewriteCount = 0;
+  let lastRewrite = null;
 
   function normalizeMode(value) {
     const normalized = String(value || "").trim().toLowerCase();
@@ -265,11 +267,17 @@ ${SERVICE_TIER_START_MARKER}
     if (!REQUEST_METHODS.has(method) || !params || typeof params !== "object") return params;
     if (isFastTierValue(params.serviceTier)) {
       const value = fastTierValue();
-      return params.serviceTier === value ? params : { ...params, serviceTier: value };
+      if (params.serviceTier === value) return params;
+      rewriteCount += 1;
+      lastRewrite = { method, serviceTier: value, at: Date.now() };
+      return { ...params, serviceTier: value };
     }
     const value = serviceTierForMode(effectiveMode());
     if (value === undefined) return params;
-    return params.serviceTier === value ? params : { ...params, serviceTier: value };
+    if (params.serviceTier === value) return params;
+    rewriteCount += 1;
+    lastRewrite = { method, serviceTier: value || "standard", at: Date.now() };
+    return { ...params, serviceTier: value };
   }
 
   function rewriteMessage(message) {
@@ -317,7 +325,18 @@ ${SERVICE_TIER_START_MARKER}
   }
 
   function dispatcherFromModule(module) {
-    for (const value of Object.values(module || {})) {
+    const exports = Object.values(module || {});
+    for (const value of exports) {
+      if (typeof value !== "function" || typeof value.getInstance !== "function") continue;
+      let source = "";
+      try { source = Function.prototype.toString.call(value); } catch {}
+      if (!source.includes("dispatchMessage")) continue;
+      try {
+        const dispatcher = value.getInstance();
+        if (dispatcher && typeof dispatcher.dispatchMessage === "function") return dispatcher;
+      } catch {}
+    }
+    for (const value of exports) {
       if (!value || typeof value.getInstance !== "function") continue;
       try {
         const dispatcher = value.getInstance();
@@ -371,6 +390,8 @@ ${SERVICE_TIER_START_MARKER}
       inheritedServiceTierLoaded,
       fastTierValue: fastTierValue(),
       patchInstalled: !!window.__codexRebuildServiceTierPatchInstalled,
+      rewriteCount,
+      lastRewrite,
       lastError: window.__codexRebuildServiceTierLastError || "",
     };
   }
@@ -404,6 +425,7 @@ ${SERVICE_TIER_START_MARKER}
       "Configured: " + configured,
       "Inherited default-service-tier: " + inherited,
       "Fast sends serviceTier=priority on thread/start, thread/resume, turn/start.",
+      "Rewrites: " + current.rewriteCount,
       "Click: toggle fast/standard. Right click: inherit.",
       current.lastError ? "Last error: " + current.lastError : "",
     ].filter(Boolean).join("\\n");
