@@ -724,9 +724,11 @@ function main() {
 
       const t0 = Date.now();
       let astPatches = [];
+      let nativeAuthPatches = [];
       try {
         const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
         astPatches = collectPatches(ast, source);
+        nativeAuthPatches = collectNativeFastAuthPatches(ast, source);
       } catch {
         // The statsig gate patch is regex-based and can still run on minified
         // chunks even when acorn cannot parse a particular bundle.
@@ -734,7 +736,7 @@ function main() {
 
       const patches = mergePatches(
         astPatches,
-        collectNativeFastAuthPatches(ast, source),
+        nativeAuthPatches,
         collectStatsigFastGatePatches(source),
         collectGenericStatsigFastModePatches(source),
       );
